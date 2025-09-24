@@ -126,3 +126,54 @@ npx hardhat test --network hardhat ..\submission\poc\003-safesend-refund.test.js
 npx hardhat test --network hardhat ..\submission\poc\004-gnosis-end2end.test.js
 npx hardhat test --network hardhat ..\submission\poc\005-optimism-end2end.test.js
 ```
+
+---
+
+## Polygon FxPortal Root dispatcher uses raw address(this).call(_data) without selector allowlist
+**Severity**: Low
+
+**Description**  
+On the Polygon Root (L1) side, messages relayed from FxPortal are dispatched using a raw self-call of the arbitrary calldata provided by the child:
+
+```25:29:contracts/src/0.8/RealitioForeignProxyPolygon.sol
+function _processMessageFromChild(bytes memory _data) internal override {
+    // solhint-disable-next-line avoid-low-level-calls
+    (bool success, ) = address(this).call(_data);
+    require(success, "Failed to call contract");
+}
+```
+
+Combined with the `onlyBridge` gating pattern (functions require `msg.sender == address(this)`), any public/external function that relies solely on `onlyBridge` can be reachable through arbitrary child-provided `_data`. Today the callable surface is safe due to state checks and explicit selectors used by the code; however, the lack of a selector allowlist implies a “future reachability” risk: adding new `onlyBridge` functions later could unintentionally be reachable via any valid child message.
+
+- Affected files:
+  - `contracts/src/0.8/RealitioForeignProxyPolygon.sol` (Root side)
+  - `contracts/src/0.8/RealitioHomeProxyPolygon.sol` (Child side uses similar pattern via `_processMessageFromRoot`)
+- Effect: Increased attack surface for future changes; current code relies on state gating and correct bridge usage but does not restrict which selectors can be dispatched.
+
+**Attack Scenario**  
+1) A legitimate child tunnel (or compromised environment) submits calldata targeting a different `onlyBridge` function than the usual flow.  
+2) The Root contract forwards the calldata with `address(this).call(_data)`; if state conditions allow, that function executes.  
+3) While current handlers appear safe due to state checks, adding new `onlyBridge` handlers later could be unintentionally reachable by arbitrary child‑provided `_data`.
+
+**Attachments**
+1. **Proof of Concept (PoC) File**  
+`submission/poc/006-polygon-dispatch.test.js`  
+(Shows that arbitrary selectors can be encoded for dispatch; demonstrates reliance on `onlyBridge` and state to block unintended calls; recommends allowlisting.)
+
+2. **Revised Code File (Optional)**  
+Selector allowlist recommendation:
+```solidity
+// Pseudocode inside _processMessageFromChild/_processMessageFromRoot
+bytes4 sel;
+assembly { sel := mload(add(_data, 0x20)) } // first 4 bytes
+require(
+    sel == IHomeArbitrationProxy.receiveArbitrationRequest.selector ||
+    sel == IHomeArbitrationProxy.receiveArbitrationAcknowledgement.selector ||
+    sel == IHomeArbitrationProxy.receiveArbitrationCancelation.selector ||
+    sel == IHomeArbitrationProxy.receiveArbitrationFailure.selector ||
+    sel == IHomeArbitrationProxy.receiveArbitrationAnswer.selector,
+    "Selector not allowed"
+);
+(bool success, ) = address(this).call(_data);
+require(success, "Failed to call contract");
+```
