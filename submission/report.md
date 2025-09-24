@@ -1,5 +1,42 @@
 # Audit Report - Kleros Cross-chain Realitio Proxy
 
+## Outbound bridge enqueue return unchecked enables false success, stalls disputes
+**Severity**: Medium
+
+**Description**  
+Outbound bridge enqueues are not checked for success in multiple paths. For Gnosis Home/Foreign proxies, calls like `amb.requireToPassMessage(foreignProxy, data, amb.maxGasPerTx())` do not verify the return value before emitting success events and progressing state. Similar patterns exist on Optimism (`sendMessage`) and zkSync (`requestL2Transaction`). If the bridge soft‑fails (returns false/no‑op) or drops the message, the contract still signals success, causing liveness failures and state/event desynchronization across chains.
+
+Impacted examples (non‑exhaustive):
+- Home Gnosis: `handleNotifiedRequest`, `handleRejectedRequest`
+- Foreign Gnosis: `_requestArbitration`, `_handleFailedDisputeCreation`, `_relayRule`
+- Analogous send functions on Optimism and zkSync proxies
+
+**Attack Scenario**  
+1) Bridge temporarily soft‑fails enqueue (returns false).  
+2) Proxy calls the send function and ignores the return value, emitting success events (e.g., `ArbitrationRequested`, `RequestAcknowledged`, `RulingRelayed`).  
+3) No message is actually queued; the remote chain never receives it, leaving the dispute stuck.
+
+**Attachments**
+1. PoC files  
+   - `contracts/test/poc/amb-softfail-foreign-gnosis.test.js` (validated)  
+   - `contracts/test/poc/amb-softfail.test.js` (home path)  
+   - Mock: `contracts/src/0.8/test/gnosis/MockAMBSoftFail.sol`
+
+2. How to run  
+```
+cd cross-chain-realitio-proxy/contracts
+$env:PRIVATE_KEY="0x59c6995e998f97a5a0044976f7d28e2f68f5e5d2d0b3e6a53a4f3aa1f0b7c5d1"
+$env:ALCHEMY_API_KEY="demo"
+npx hardhat test --network hardhat test/poc/amb-softfail-foreign-gnosis.test.js
+```
+
+3. Recommendation  
+- Require success on enqueue (example Gnosis): `require(amb.requireToPassMessage(...), "AMB enqueue failed");`  
+- For Optimism/zkSync: enforce success or track message IDs and provide a retry path.  
+- Emit a failure event (e.g., `OutboundEnqueueFailed`) when enqueue fails.
+
+---
+
 ## SafeSend ignores ERC-20 transfer return value causing silent refund loss
 **Severity**: Medium
 
